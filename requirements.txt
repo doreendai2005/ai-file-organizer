@@ -1,0 +1,10 @@
+rich
+pypdf
+pillow
+openai
+python-dotenv
+anthropic
+google-generativeai
+groq
+requests
+pytest
