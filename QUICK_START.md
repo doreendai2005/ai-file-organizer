@@ -58,6 +58,15 @@ python3 organizer.py
 # Organize specific directory
 python3 organizer.py --dir ~/Downloads
 
+# Dry run (preview without moving files)
+python3 organizer.py --dir ~/Desktop --dry-run
+
+# Show accuracy statistics
+python3 organizer.py --show-stats
+
+# Undo last session
+python3 organizer.py --undo
+
 # Disable auto-accept
 python3 organizer.py --dir ~/Desktop --no-auto-accept
 
@@ -88,7 +97,30 @@ Edit `organizer_lib/config.py` to customize:
 
 ### Advanced Features
 
-- **Series Detection**: Automatically numbers files in a series (001, 002, 003...)
-- **Memory Tracking**: Learns from your corrections in `memory.json`
-- **Category Management**: Saved categories in `categories.json`
-- **Vision AI**: Analyzes image content for better naming
+#### Performance & Caching
+- **AI Result Caching**: Similar files use cached AI results (faster, fewer API calls)
+- **Pattern Rules**: Recognizes common patterns (homework1, receipt_jan) without AI
+- **Smart Vision**: Skips vision API for obvious screenshots (saves $)
+- **Cache Stats**: Shows hit rate and performance gains in summary
+
+#### Accuracy & Learning
+- **Learned Patterns**: After 2+ corrections for same folder → auto-apply category
+- **Pattern Suggestions**: Shows detected patterns at end of session
+- **Accuracy Tracking**: Tracks accuracy over time with session history
+- **Extension Hints**: Smart guesses based on file type
+- **Better Series Detection**: Improved number recognition (hw1, lecture-02, scan_001)
+
+#### User Experience
+- **Dry Run Mode**: Preview changes without moving files (`--dry-run`)
+- **Undo Functionality**: Reverse entire sessions (`--undo`)
+- **Undo History**: Tracks last 10 sessions for easy recovery
+- **Accuracy Stats**: View performance over time (`--show-stats`)
+- **Interactive Mode**: User-friendly menu for non-technical users
+- **Double-Click Launcher**: `organize.command` for easy access
+
+#### Smart Features
+- **Session Tracking**: Monitors accuracy per session
+- **Folder Intelligence**: Groups folders with 3+ files, handles loose files separately
+- **Context Memory**: Remembers folder → category mappings
+- **Description Learning**: Learns from filename corrections
+- **Timing Auto-Set**: Automatically applies learned year/season to categories

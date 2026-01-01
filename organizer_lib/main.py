@@ -17,6 +17,7 @@ from .utils import (
 )
 from .trackers import MemoryTracker, SeriesTracker, CategoryTracker
 from .ai_handler import analyze_files_with_ai, generate_new_name
+from .undo import UndoHistory  # import undo functionality
 
 console = Console()
 
@@ -77,7 +78,7 @@ def infer_context_from_folder(folder_name, category_tracker):
 
     return None, 0.0
 
-def review_single_file(file_path, meta, ai_result, file_index, total_files, series_tracker=None, auto_accept_high_confidence=True, category_tracker=None, memory_tracker=None):
+def review_single_file(file_path, meta, ai_result, file_index, total_files, series_tracker=None, auto_accept_high_confidence=True, category_tracker=None, memory_tracker=None, dry_run=False, undo_history=None):
     """Review a single file with confidence display and auto-accept."""
     context = ai_result.get("context", "Misc")
     desc = ai_result.get("description", "File")
@@ -98,20 +99,32 @@ def review_single_file(file_path, meta, ai_result, file_index, total_files, seri
 
         new_name = generate_new_name(meta, ai_result, series_tracker)
         created_dt = datetime.datetime.fromtimestamp(meta["created"])
-        
+
         season = get_season(created_dt)
         dest_folder = DESTINATION_ROOT / f"{created_dt.year}-{season}" / context
-        
-        dest_folder.mkdir(parents=True, exist_ok=True)
-        final_path = get_unique_path(dest_folder, new_name)
-        shutil.move(str(file_path), str(final_path))
 
-        conf_display = format_confidence_display(ai_result)
-        console.print(f"[green]AUTO[/green] [{file_index}/{total_files}] {conf_display['confidence_str']} {file_path.name}")
-        console.print(f"     → {final_path.name}")
+        if dry_run:
+            # Dry run - just show what would happen
+            final_path = dest_folder / new_name
+            conf_display = format_confidence_display(ai_result)
+            console.print(f"[yellow]DRY-RUN AUTO[/yellow] [{file_index}/{total_files}] {conf_display['confidence_str']} {file_path.name}")
+            console.print(f"     → [dim]would move to:[/dim] {final_path}")
+        else:
+            # Actually move the file
+            dest_folder.mkdir(parents=True, exist_ok=True)
+            final_path = get_unique_path(dest_folder, new_name)
+            shutil.move(str(file_path), str(final_path))
+
+            # Record move for undo
+            if undo_history:
+                undo_history.record_move(file_path, final_path, "moved")
+
+            conf_display = format_confidence_display(ai_result)
+            console.print(f"[green]AUTO[/green] [{file_index}/{total_files}] {conf_display['confidence_str']} {file_path.name}")
+            console.print(f"     → {final_path.name}")
 
         if memory_tracker:
-            memory_tracker.record_acceptance(meta)
+            memory_tracker.record_acceptance(meta, was_auto=True)
 
         return (True, "moved")
 
@@ -514,10 +527,15 @@ def interactive_setup():
 
     return scan_dir, folder_mode, auto_accept
 
-def process_files(scan_dir, batch_size=3, recursive=False, auto_accept=True, folder_mode=None):
+def process_files(scan_dir, batch_size=3, recursive=False, auto_accept=True, folder_mode=None, dry_run=False):
+    """Process files with optional dry-run mode (preview without moving)"""
     series_tracker = SeriesTracker()
     category_tracker = CategoryTracker()
     memory_tracker = MemoryTracker()
+    undo_history = UndoHistory() if not dry_run else None  # only track undo if actually moving files
+
+    # Start session tracking for accuracy stats
+    memory_tracker.start_session()
     
     if recursive:
         iterator = scan_dir.rglob('*')
@@ -529,7 +547,11 @@ def process_files(scan_dir, batch_size=3, recursive=False, auto_accept=True, fol
     
     if not files:
         console.print(f"[yellow]No supported files found in {scan_dir}[/yellow]")
+        memory_tracker.end_session()  # end session even if no files
         return
+
+    if dry_run:
+        console.print("[bold yellow]🔍 DRY RUN MODE - No files will be moved[/bold yellow]\n")
         
     files.sort(key=lambda x: x.stat().st_ctime, reverse=True)
     total = len(files)
@@ -590,7 +612,7 @@ def process_files(scan_dir, batch_size=3, recursive=False, auto_accept=True, fol
                              res = analyze_files_with_ai([meta], series_tracker, category_tracker, memory_tracker)
                              result = res[0] if res else {"context": "Misc", "confidence": 0.3}
                     
-                    cont, act = review_single_file(file_path, meta, result, j+1, len(folder_files), series_tracker, auto_accept, category_tracker, memory_tracker)
+                    cont, act = review_single_file(file_path, meta, result, j+1, len(folder_files), series_tracker, auto_accept, category_tracker, memory_tracker, dry_run, undo_history)
                     if act in stats: stats[act] += 1
                     if not cont: break
 
@@ -616,7 +638,7 @@ def process_files(scan_dir, batch_size=3, recursive=False, auto_accept=True, fol
 
                 for j, (file_path, meta, result) in enumerate(zip(batch, batch_meta, ai_results)):
                     file_index = i + j + 1
-                    cont, act = review_single_file(file_path, meta, result, file_index, len(loose_files), series_tracker, auto_accept, category_tracker, memory_tracker)
+                    cont, act = review_single_file(file_path, meta, result, file_index, len(loose_files), series_tracker, auto_accept, category_tracker, memory_tracker, dry_run, undo_history)
                     if act == "moved" and result.get("confidence", 0) >= HIGH_CONFIDENCE_THRESHOLD:
                         stats["auto_accepted"] += 1
                     if act in stats: stats[act] += 1
@@ -643,19 +665,58 @@ def process_files(scan_dir, batch_size=3, recursive=False, auto_accept=True, fol
 
             for j, (file_path, meta, result) in enumerate(zip(batch, batch_meta, ai_results)):
                 file_index = i + j + 1
-                cont, act = review_single_file(file_path, meta, result, file_index, total, series_tracker, auto_accept, category_tracker, memory_tracker)
+                cont, act = review_single_file(file_path, meta, result, file_index, total, series_tracker, auto_accept, category_tracker, memory_tracker, dry_run, undo_history)
                 if act == "moved" and result.get("confidence", 0) >= HIGH_CONFIDENCE_THRESHOLD:
                     stats["auto_accepted"] += 1
                 if act in stats: stats[act] += 1
                 if not cont: return
 
-    console.print(Panel(
-        f"[bold]Session Summary[/bold]\n\n"
+    # End session and get accuracy stats
+    memory_tracker.end_session()
+    accuracy_stats = memory_tracker.get_accuracy_stats()
+
+    # Save undo history for this session
+    if undo_history and stats['moved'] > 0:
+        undo_history.save_session(f"{scan_dir.name} - {stats['moved']} files")
+
+    # Build summary panel with stats
+    summary_text = f"[bold]Session Summary[/bold]\n\n"
+
+    if dry_run:
+        summary_text += "[yellow]🔍 DRY RUN - No files were actually moved[/yellow]\n\n"
+
+    summary_text += (
         f"[green]Moved:[/green]   {stats['moved']} ({stats['auto_accepted']} auto, {stats['folder_batched']} batch)\n"
         f"[red]Trashed:[/red] {stats['trashed']}\n"
-        f"[blue]Skipped:[/blue] {stats['skipped']}",
-        title="Complete"
-    ))
+        f"[blue]Skipped:[/blue] {stats['skipped']}\n\n"
+    )
+
+    # Add accuracy stats if available
+    if accuracy_stats.get("total_files", 0) > 0:
+        summary_text += f"[bold cyan]📊 Overall Accuracy: {accuracy_stats['overall_accuracy']}%[/bold cyan]\n"
+        summary_text += f"[dim]({accuracy_stats['total_files']} total files, {accuracy_stats['corrections']} corrections)[/dim]\n\n"
+
+        # Show efficiency gains
+        if accuracy_stats.get("cache_hits", 0) > 0:
+            summary_text += f"[dim]⚡ Performance: {accuracy_stats['cache_hits']} cache hits, {accuracy_stats['pattern_matched']} pattern matches[/dim]\n"
+
+    # Add undo hint
+    if not dry_run and undo_history and stats['moved'] > 0:
+        summary_text += f"\n[dim]💡 Tip: Run with [cyan]--undo[/cyan] to reverse this session[/dim]"
+
+    console.print(Panel(summary_text, title="Complete"))
+
+    # Show pattern suggestions if any detected
+    pattern_suggestions = memory_tracker.suggest_pattern_rules()
+    if pattern_suggestions and not dry_run:
+        console.print("\n[bold cyan]🧠 Smart Learning: Patterns Detected[/bold cyan]\n")
+        console.print("[dim]The system noticed these patterns in your corrections:[/dim]\n")
+
+        for i, suggestion in enumerate(pattern_suggestions, 1):
+            console.print(f"  {i}. {suggestion['pattern']}")
+            console.print(f"     [dim]{suggestion['reason']} - Confidence: {suggestion['confidence']}[/dim]")
+
+        console.print("\n[dim]These patterns are automatically applied to future files![/dim]")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -668,7 +729,43 @@ def main():
     parser.add_argument("--no-folder-mode", action="store_true", help="Disable folder batch mode")
     parser.add_argument("--folder-mode", action="store_true", help="Force folder batch mode")
     parser.add_argument("--interactive", action="store_true", help="Force interactive mode (default if no args)")
+    parser.add_argument("--dry-run", action="store_true", help="Preview changes without moving files")
+    parser.add_argument("--undo", action="store_true", help="Undo the last session")
+    parser.add_argument("--show-stats", action="store_true", help="Show accuracy statistics")
     args = parser.parse_args()
+
+    # Handle undo command
+    if args.undo:
+        undo_history = UndoHistory()
+        undo_history.undo_last_session()
+        return
+
+    # Handle show-stats command
+    if args.show_stats:
+        memory_tracker = MemoryTracker()
+        stats = memory_tracker.get_accuracy_stats()
+
+        console.print(Panel(
+            f"[bold cyan]📊 Accuracy Statistics[/bold cyan]\n\n"
+            f"[bold]Overall Accuracy:[/bold] {stats['overall_accuracy']}%\n"
+            f"[dim]Total files processed: {stats['total_files']}[/dim]\n"
+            f"[dim]Corrections made: {stats['corrections']}[/dim]\n\n"
+            f"[bold]Performance:[/bold]\n"
+            f"[dim]Auto-accepted: {stats.get('auto_accepted', 0)}[/dim]\n"
+            f"[dim]Pattern matched: {stats.get('pattern_matched', 0)}[/dim]\n"
+            f"[dim]Cache hits: {stats.get('cache_hits', 0)}[/dim]\n\n"
+            f"[bold]Recent Sessions:[/bold]",
+            title="Statistics"
+        ))
+
+        if stats.get("recent_sessions"):
+            for session in stats["recent_sessions"][-5:]:
+                accuracy = session.get("accuracy", 0)
+                console.print(f"  • {accuracy}% accuracy - {session.get('files_processed', 0)} files - {session.get('start_time', '')[:10]}")
+        else:
+            console.print("[dim]  No recent sessions[/dim]")
+
+        return
 
     # If no arguments provided OR --interactive flag, use interactive wizard for non-technical users
     import sys
@@ -693,7 +790,7 @@ def main():
         auto_accept = not args.no_auto_accept
 
     # Run the organizer with chosen settings
-    process_files(scan_path, recursive=True, auto_accept=auto_accept, folder_mode=folder_mode)
+    process_files(scan_path, recursive=True, auto_accept=auto_accept, folder_mode=folder_mode, dry_run=args.dry_run if hasattr(args, 'dry_run') else False)
 
 if __name__ == "__main__":
     main()

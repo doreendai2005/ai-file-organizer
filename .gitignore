@@ -46,6 +46,8 @@ htmlcov/
 # User data (don't commit personal files/memory)
 memory.json
 categories.json
+ai_cache.json
+undo_history.json
 
 # OS
 .DS_Store

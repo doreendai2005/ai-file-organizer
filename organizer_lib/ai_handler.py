@@ -7,8 +7,13 @@ from groq import Groq
 
 from .config import GROQ_KEY, IMAGE_EXTENSIONS, VISION_MODEL, TEXT_MODEL
 from .utils import get_season
+from .cache import AICache, PatternRules  # import new cache and pattern matching
 
 console = Console()
+
+# Initialize global cache and pattern rules for session (reused across all calls)
+ai_cache = AICache()
+pattern_rules = PatternRules()
 
 def analyze_image_with_vision(meta, client):
     """Uses Groq vision model to describe image content for better naming."""
@@ -84,20 +89,61 @@ def analyze_files_with_ai(files_metadata, series_tracker=None, category_tracker=
         console.print("[red]Error: GROQ_API_KEY not found in .env[/red]")
         return None
 
+    # Phase 1: Try cache and pattern rules first (fast, no API calls)
+    results = []
+    files_needing_ai = []  # files that need actual AI analysis
+    files_needing_ai_indices = []  # track original indices
+
+    for i, meta in enumerate(files_metadata):
+        # Try cache first
+        cached_result = ai_cache.get(meta)
+        if cached_result:
+            results.append(cached_result)
+            continue  # skip AI call, use cached result
+
+        # Try pattern matching second
+        pattern_match = pattern_rules.match_pattern(meta)
+        if pattern_match:
+            # Pattern match found - use it and cache it
+            ai_cache.set(meta, pattern_match)
+            results.append(pattern_match)
+            console.print(f"[dim]📋 Pattern matched: {meta['filename']} → {pattern_match['context']}[/dim]")
+            continue  # skip AI call
+
+        # No cache or pattern match - need AI analysis
+        results.append(None)  # placeholder
+        files_needing_ai.append(meta)
+        files_needing_ai_indices.append(i)
+
+    # Phase 2: Only call AI for files that need it (saves time and API calls)
+    if not files_needing_ai:
+        # All files were cached or pattern-matched!
+        stats = ai_cache.get_stats()
+        console.print(f"[dim]💨 All files processed from cache/patterns (hit rate: {stats['hit_rate']:.1f}%)[/dim]")
+        return results
+
+    console.print(f"[dim]Analyzing {len(files_needing_ai)}/{len(files_metadata)} files with AI (others cached/matched)[/dim]")
+
     client = Groq(api_key=GROQ_KEY)
 
-    # Step 1: For images, get vision descriptions first
-    for meta in files_metadata:
+    # Step 1: For images (that need AI), get vision descriptions first (but skip simple screenshots to save time/money)
+    for meta in files_needing_ai:
         if meta["extension"] in IMAGE_EXTENSIONS and meta.get("image_base64"):
+            # Skip vision for obvious screenshots (filename pattern)
+            filename_lower = meta.get("original_stem", "").lower()
+            if "screenshot" in filename_lower or "screen shot" in filename_lower:
+                console.print(f"[dim]Skipping vision for screenshot: {meta['filename']}[/dim]")
+                continue  # skip vision API for screenshots (save $ and time)
+
             with console.status(f"[bold green]Analyzing image: {meta['filename']}...[/bold green]"):
                 vision_desc = analyze_image_with_vision(meta, client)
                 if vision_desc:
                     meta["vision_description"] = vision_desc
                     meta["content_preview"] = f"[Vision]: {vision_desc}"
 
-    # Step 2: Build detailed info string
+    # Step 2: Build detailed info string (only for files needing AI)
     items_str = ""
-    for i, meta in enumerate(files_metadata):
+    for i, meta in enumerate(files_needing_ai):
         preview = meta.get("content_preview", "")[:500]
         exif_str = ", ".join(f"{k}: {v}" for k, v in meta.get("exif", {}).items()) or "none"
         neighbors = ", ".join(meta.get("neighboring_files", [])[:5]) or "none"
@@ -181,10 +227,22 @@ Return ONLY valid JSON.
         console.print(f"[dim]AI raw response: {content[:300]}...[/dim]")
 
         content = content.replace("```json", "").replace("```", "").strip()
-        result = try_parse_json(content)
-        
-        if result:
-            return result
+        ai_results = try_parse_json(content)
+
+        if ai_results:
+            # Merge AI results back into the full results array at correct positions
+            for i, ai_result in enumerate(ai_results):
+                original_index = files_needing_ai_indices[i]
+                results[original_index] = ai_result
+
+                # Cache the AI result for future use
+                ai_cache.set(files_needing_ai[i], ai_result)
+
+            # Show cache stats
+            stats = ai_cache.get_stats()
+            console.print(f"[dim]Cache stats: {stats['hits']} hits, {stats['misses']} misses ({stats['hit_rate']:.1f}% hit rate)[/dim]")
+
+            return results
 
         console.print(f"[red]Could not parse AI response as JSON[/red]")
         return None
